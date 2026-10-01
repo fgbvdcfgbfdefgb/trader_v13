@@ -467,10 +467,27 @@ def main():
         pool = list(todays) * 2 + pool
         if not pool:
             pool = list(todays)
-        k = min(batch_days, len(pool))
-        return random.sample(pool, k)
+        if len(pool) < batch_days:
+            # pad with repeats so the batch shape is CONSTANT from epoch 1:
+            # cudnn then autotunes exactly once (no workspace/fragment churn)
+            reps = -(-batch_days // len(pool))
+            pool = (pool * reps)[:batch_days]
+        return random.sample(pool, batch_days)
 
     # ---------------- agent training steps ----------------
+    def _oom_guard(fn, batch):
+        """Retry an advisor step with half the batch if the GPU ran dry
+        (shared machines, cudnn workspace spikes)."""
+        try:
+            return fn(batch)
+        except RuntimeError as e:
+            if "out of memory" not in str(e).lower():
+                raise
+            torch.cuda.empty_cache()
+            half = batch[: max(1, len(batch) // 2)]
+            print(f"[oom] {fn.__name__}: retry with {len(half)} day(s)", flush=True)
+            return fn(half)
+
     def predictor_train_batch(batch):
         x = torch.as_tensor(np.stack([d.feats for d in batch]), device=dev_p)
         Yn = torch.as_tensor(np.stack([d.Y_norm for d in batch]), device=dev_p)
@@ -756,13 +773,13 @@ def main():
                 for _ in range(pred_steps):
                     b = sample_batch(procs)
                     if b:
-                        pred_stats.append(predictor_train_batch(b))
+                        pred_stats.append(_oom_guard(predictor_train_batch, b))
 
             def _aa():
                 for _ in range(ana_steps):
                     b = sample_batch(procs)
                     if b:
-                        ana_stats.append(analyzer_train_batch(b))
+                        ana_stats.append(_oom_guard(analyzer_train_batch, b))
 
             ths = [threading.Thread(target=_pa), threading.Thread(target=_aa)]
             for t in ths:
@@ -789,13 +806,13 @@ def main():
                     for _ in range(args.bg_steps):
                         b = sample_batch(procs)
                         if b:
-                            predictor_train_batch(b)
+                            _oom_guard(predictor_train_batch, b)
 
                 def _bga():
                     for _ in range(args.bg_steps):
                         b = sample_batch(procs)
                         if b:
-                            analyzer_train_batch(b)
+                            _oom_guard(analyzer_train_batch, b)
 
                 bg = [threading.Thread(target=_bgp), threading.Thread(target=_bga)]
                 for t in bg:
