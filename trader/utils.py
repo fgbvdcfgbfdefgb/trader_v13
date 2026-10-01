@@ -151,7 +151,9 @@ def solve_tier(min_free_gb, budget_gb, disk_free_gb, opt8bit,
     """
     mandate = mandate or MANDATE
     ana_t, pred_t, trd_t = mandate["analyzer"], mandate["predictor"], mandate["trader"]
-    bud = min(float(budget_gb), min_free_gb * 0.85) if min_free_gb > 0 else 0.0
+    # 0.72 of *currently* free VRAM: co-located workloads (e.g. miners)
+    # fluctuate their footprint, so leave a wide third-party margin
+    bud = min(float(budget_gb), min_free_gb * 0.72) if min_free_gb > 0 else 0.0
 
     if bud < 1.0:  # CPU / no usable GPU: fixed tiny tier
         return {"name": "XS (CPU)", "pred_hidden": 64, "pred_layers": 1,
@@ -165,8 +167,8 @@ def solve_tier(min_free_gb, budget_gb, disk_free_gb, opt8bit,
     adv_bpp = 4 + 4 + opt_b + 4                       # live+grads+opt+EMA copy
     trd_bpp = 4 + 4 + opt_b                           # traders have no EMA
     ck_bpp = 4 + opt_b                                # checkpoint bytes/param
-    act_adv = max(1.2, 0.16 * bud)                    # GRU train activations
-    act_trd = max(0.8, 0.10 * bud)                    # PPO minibatch activations
+    act_adv = max(1.2, 0.25 * bud)                    # GRU train activations
+    act_trd = max(0.8, 0.12 * bud)                    # PPO minibatch activations
 
     pred_cap = max(0.0, bud - act_adv) * 1e9 / adv_bpp
     ana_cap = max(0.0, bud - act_adv) * 1e9 / adv_bpp
@@ -195,9 +197,9 @@ def solve_tier(min_free_gb, budget_gb, disk_free_gb, opt8bit,
         bd, mb, ps = 8, 512, 10
     else:
         bd, mb, ps = 4, 256, 8
-    # activation-aware caps: advisor GRU ~ B*1440*H*4B*3L*2.5 bytes per day
-    # (H*4.32e-5 GB/day), trader PPO ~ mb*h*4B*3L*2.5 bytes per sample
-    bd = max(1, min(bd, int(act_adv / (pred_H * 4.32e-5))))
+    # activation-aware caps: advisor GRU training (incl. cudnn workspace)
+    # measures ~H*8e-5 GB per day on Turing cards; trader PPO ~ h*30 B/sample
+    bd = max(1, min(bd, int(act_adv / (pred_H * 8.0e-5))))
     mb = max(64, min(mb, int(act_trd * 1e9 / (trd_h * 30.0))))
 
     full = (s >= 0.995 and pred_p >= pred_t and ana_p >= ana_t and trd_p >= trd_t)
